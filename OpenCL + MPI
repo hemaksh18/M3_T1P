@@ -1,0 +1,82 @@
+#include <iostream>
+#include <cstdlib>
+#include <chrono>
+#include <mpi.h>
+#include <CL/cl.h>
+
+using namespace std;
+using namespace std::chrono;
+
+const int N = 700;
+const char* kernelSource =
+    "__kernel void matrix_multiply(__global const int* A, __global const int* B, __global int* C, const int N) {\n"
+    "    int row = get_global_id(0);\n"
+    "    int col = get_global_id(1);\n"
+    "    int sum = 0;\n"
+    "    for (int i = 0; i < N; ++i) {\n"
+    "        sum += A[row * N + i] * B[i * N + col];\n"
+    "    }\n"
+    "    C[row * N + col] = sum;\n"
+    "}\n";
+
+int main(int argc, char* argv[]) {
+    int rank, size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    cl_int err;
+    cl_platform_id platform;
+    err = clGetPlatformIDs(1, &platform, NULL);
+    cl_device_id device;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    cl_command_queue queue = clCreateCommandQueue(context, device, 0, &err);
+    cl_program program = clCreateProgramWithSource(context, 1, &kernelSource, NULL, &err);
+    err = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+    cl_kernel kernel = clCreateKernel(program, "matrix_multiply", &err);
+
+    int A[N][N], B[N][N], C[N][N];
+
+    srand(time(0) + rank);
+
+    for (int i = rank * (N / size); i < (rank + 1) * (N / size); ++i) {
+        for (int j = 0; j < N; ++j) {
+            A[i][j] = rand() % 100;
+            B[i][j] = rand() % 100;
+        }
+    }
+
+    cl_mem bufferA = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * N * N, A, &err);
+    cl_mem bufferB = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * N * N, B, &err);
+    cl_mem bufferC = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(int) * N * N, NULL, &err);
+
+    err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufferA);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufferB);
+    err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufferC);
+    err |= clSetKernelArg(kernel, 3, sizeof(int), &N);
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    size_t globalWorkSize[2] = { N, N };
+    err = clEnqueueNDRangeKernel(queue, kernel, 2, NULL, globalWorkSize, NULL, 0, NULL, NULL);
+    err = clEnqueueReadBuffer(queue, bufferC, CL_TRUE, 0, sizeof(int) * N * N, C, 0, NULL, NULL);
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    if (rank == 0) {
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        cout << "Time taken for multiplication: " << duration.count() / 1E6 << " seconds" << endl;
+    }
+
+    clReleaseMemObject(bufferA);
+    clReleaseMemObject(bufferB);
+    clReleaseMemObject(bufferC);
+    clReleaseKernel(kernel);
+    clReleaseProgram(program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+
+    MPI_Finalize();
+    return 0;
+}
